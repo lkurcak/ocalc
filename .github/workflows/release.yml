@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Get version from tag
+      id: get_version
+      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+    
+    - name: Get version from dune-project
+      id: get_dune_version
+      run: echo "dune_version=$(grep -oP '(?<=\(version )\S+(?=\))' dune-project)" >> $GITHUB_OUTPUT
+    
+    - name: Check version match
+      run: |
+        if [ "${{ steps.get_version.outputs.version }}" != "${{ steps.get_dune_version.outputs.dune_version }}" ]; then
+          echo "Error: Tag version (${{ steps.get_version.outputs.version }}) does not match dune-project version (${{ steps.get_dune_version.outputs.dune_version }})"
+          exit 1
+        fi
+        echo "Version check passed: ${{ steps.get_version.outputs.version }}"
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+  build:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+            artifact_name: ocalc-macos-arm64
+          - os: ubuntu-latest
+            arch: x64
+            artifact_name: ocalc-linux-x64
+          - os: windows-latest
+            arch: x64
+            artifact_name: ocalc-windows-x64.exe
+          - os: windows-latest
+            arch: arm64
+            artifact_name: ocalc-windows-arm64.exe
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up OCaml
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.2.x
+    
+    - name: Install dependencies
+      run: opam install . --deps-only
+    
+    - name: Build
+      run: opam exec -- dune build --profile=release
+    
+    - name: Copy binary (Unix)
+      if: runner.os != 'Windows'
+      run: cp _build/default/bin/main.exe ocalc
+    
+    - name: Copy binary (Windows)
+      if: runner.os == 'Windows'
+      run: copy _build\default\bin\main.exe ocalc.exe
+    
+    - name: Upload Release Asset (Unix)
+      if: runner.os != 'Windows'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./ocalc
+        asset_name: ${{ matrix.artifact_name }}
+        asset_content_type: application/octet-stream
+    
+    - name: Upload Release Asset (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./ocalc.exe
+        asset_name: ${{ matrix.artifact_name }}
+        asset_content_type: application/octet-stream

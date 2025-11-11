@@ -20,4 +20,6 @@ let () =
   test_parse_and_eval "10 / 3" 3;
   test_parse_and_eval "10 / 2" 5;
   test_parse_and_eval "10 / 1" 10;
+  test_parse_and_eval "4 / 2 / 2" 1;
+  test_parse_and_eval "2 - 1 - 1" 0;
   Printf.printf "Tests done\n"

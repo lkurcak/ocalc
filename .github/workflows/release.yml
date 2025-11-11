@@ -36,18 +36,18 @@ jobs:
     strategy:
       matrix:
         include:
-        #   - os: macos-latest
-        #     arch: arm64
-        #     artifact_name: ocalc-macos-arm64
+          - os: macos-latest
+            arch: arm64
+            artifact_name: ocalc-macos-arm64
           - os: ubuntu-latest
             arch: x64
             artifact_name: ocalc-linux-x64
-        #   - os: windows-latest
-        #     arch: x64
-        #     artifact_name: ocalc-windows-x64.exe
-        #   - os: windows-latest
-        #     arch: arm64
-        #     artifact_name: ocalc-windows-arm64.exe
+          - os: windows-latest
+            arch: x64
+            artifact_name: ocalc-windows-x64.exe
+          - os: windows-latest
+            arch: arm64
+            artifact_name: ocalc-windows-arm64.exe
     
     runs-on: ${{ matrix.os }}
     

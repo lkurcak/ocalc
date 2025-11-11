@@ -17,6 +17,7 @@
 
 (package
  (name ocalc)
+ (version 0.1.0)
  (synopsis "Simple calculator implemented in OCaml")
  (description "Simple calculator implemented in OCaml")
  (depends ocaml)

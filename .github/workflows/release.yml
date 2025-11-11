@@ -5,12 +5,12 @@ on:
     tags:
       - '[0-9]+.[0-9]+.[0-9]+'
 
+permissions:
+  contents: write
+
 jobs:
-  create-release:
+  check-version:
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -30,20 +30,9 @@ jobs:
           exit 1
         fi
         echo "Version check passed: ${{ steps.get_version.outputs.version }}"
-    
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        draft: false
-        prerelease: false
 
   build:
-    needs: create-release
+    needs: check-version
     strategy:
       matrix:
         include:
@@ -77,32 +66,34 @@ jobs:
     - name: Build
       run: opam exec -- dune build --profile=release
     
-    - name: Copy binary (Unix)
+    - name: Rename binary (Unix)
       if: runner.os != 'Windows'
-      run: cp _build/default/bin/main.exe ocalc
+      run: cp _build/default/bin/main.exe ${{ matrix.artifact_name }}
     
-    - name: Copy binary (Windows)
+    - name: Rename binary (Windows)
       if: runner.os == 'Windows'
-      run: copy _build\default\bin\main.exe ocalc.exe
+      run: copy _build\default\bin\main.exe ${{ matrix.artifact_name }}
     
-    - name: Upload Release Asset (Unix)
-      if: runner.os != 'Windows'
-      uses: actions/upload-release-asset@v1
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: ${{ matrix.artifact_name }}
+  
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Get version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+    
+    - name: Create GitHub release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./ocalc
-        asset_name: ${{ matrix.artifact_name }}
-        asset_content_type: application/octet-stream
-    
-    - name: Upload Release Asset (Windows)
-      if: runner.os == 'Windows'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./ocalc.exe
-        asset_name: ${{ matrix.artifact_name }}
-        asset_content_type: application/octet-stream
+      run: gh release create $VERSION --verify-tag --title $VERSION artifacts/**/*

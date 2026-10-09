@@ -4,99 +4,221 @@ on:
   push:
     tags:
       - '[0-9]+.[0-9]+.[0-9]+'
+  # Builds and packages the binaries without publishing anything.
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  TAP_REPOSITORY: lkurcak/homebrew-tap
 
 jobs:
-  check-version:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Get version from tag
-      id: get_version
-      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-    
-    - name: Get version from dune-project
-      id: get_dune_version
-      run: echo "dune_version=$(grep -oP '(?<=\(version )\S+(?=\))' dune-project)" >> $GITHUB_OUTPUT
-    
-    - name: Check version match
-      run: |
-        if [ "${{ steps.get_version.outputs.version }}" != "${{ steps.get_dune_version.outputs.dune_version }}" ]; then
-          echo "Error: Tag version (${{ steps.get_version.outputs.version }}) does not match dune-project version (${{ steps.get_dune_version.outputs.dune_version }})"
-          exit 1
-        fi
-        echo "Version check passed: ${{ steps.get_version.outputs.version }}"
+      - uses: actions/checkout@v4
+
+      - name: Read version from dune-project
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(grep -oP '(?<=\(version )\S+(?=\))' dune-project)
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match dune-project version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: check-version
+    needs: version
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            arch: arm64
-            artifact_name: ocalc-macos-arm64
-          - os: ubuntu-latest
-            arch: x64
-            artifact_name: ocalc-linux-x64
-          - os: windows-latest
-            arch: x64
-            artifact_name: ocalc-windows-x64.exe
-          - os: windows-latest
-            arch: arm64
-            artifact_name: ocalc-windows-arm64.exe
-    
-    runs-on: ${{ matrix.os }}
-    
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-gnu
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ASSET: ocalc-v${{ needs.version.outputs.version }}-${{ matrix.target }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up OCaml
-      uses: ocaml/setup-ocaml@v3
-      with:
-        ocaml-compiler: 5.2.x
-    
-    - name: Install dependencies
-      run: opam install . --deps-only
-    
-    - name: Build
-      run: opam exec -- dune build --profile=release
-    
-    - name: Rename binary (Unix)
-      if: runner.os != 'Windows'
-      run: cp _build/default/bin/main.exe ${{ matrix.artifact_name }}
-    
-    - name: Rename binary (Windows)
-      if: runner.os == 'Windows'
-      run: copy _build\default\bin\main.exe ${{ matrix.artifact_name }}
-    
-    - name: Upload binary artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact_name }}
-        path: ${{ matrix.artifact_name }}
-  
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.2.x
+
+      - name: Install dependencies
+        run: opam install . --deps-only
+
+      - name: Build
+        run: opam exec -- dune build --profile=release
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          result=$(_build/default/bin/main.exe '2 + 3' | tr -d '\r')
+          if [[ "$result" != "5" ]]; then
+            echo "::error::Expected 5, got '$result'"
+            exit 1
+          fi
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir package
+          install -m 755 _build/default/bin/main.exe package/ocalc
+          install -m 644 UNLICENSE package/UNLICENSE
+          touch -t 198001010000 package/*
+          COPYFILE_DISABLE=1 tar --format ustar -cf "$ASSET.tar" -C package ocalc UNLICENSE
+          gzip -n "$ASSET.tar"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir package
+          cp _build/default/bin/main.exe package/ocalc.exe
+          cp UNLICENSE package/UNLICENSE
+          (cd package && 7z a -tzip "../$ASSET.zip" ocalc.exe UNLICENSE)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}.*
+          if-no-files-found: error
+
   release:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-    
-    - name: Get version from tag
-      id: get_version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-    
-    - name: Create GitHub release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: gh release create $VERSION --verify-tag --title $VERSION artifacts/**/*
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
+
+  homebrew:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          repositories: homebrew-tap
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Generate formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --dir dist
+          sha() { sha256sum "dist/ocalc-v${VERSION}-$1.tar.gz" | cut -d' ' -f1; }
+          export MACOS_ARM_SHA256=$(sha aarch64-apple-darwin)
+          export LINUX_ARM_SHA256=$(sha aarch64-unknown-linux-gnu)
+          export LINUX_INTEL_SHA256=$(sha x86_64-unknown-linux-gnu)
+          export ASSET_ROOT="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+
+          python3 - Formula/ocalc.rb <<'PYTHON'
+          import os
+          import pathlib
+          import sys
+
+          version = os.environ["VERSION"]
+          root = os.environ["ASSET_ROOT"]
+          formula = f'''class Ocalc < Formula
+            desc "Simple calculator implemented in OCaml"
+            homepage "https://github.com/lkurcak/ocalc"
+            license "Unlicense"
+
+            livecheck do
+              url :stable
+              strategy :github_latest
+            end
+
+            on_macos do
+              on_arm do
+                url "{root}/ocalc-v{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "{os.environ["MACOS_ARM_SHA256"]}"
+              end
+              on_intel do
+                url "{root}/ocalc-v{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "{os.environ["MACOS_ARM_SHA256"]}"
+                depends_on arch: :arm64
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "{root}/ocalc-v{version}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "{os.environ["LINUX_ARM_SHA256"]}"
+              end
+              on_intel do
+                url "{root}/ocalc-v{version}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "{os.environ["LINUX_INTEL_SHA256"]}"
+              end
+            end
+
+            def install
+              bin.install "ocalc"
+            end
+
+            test do
+              assert_equal "5", shell_output("#{{bin}}/ocalc '2 + 3'").strip
+            end
+          end
+          '''
+
+          pathlib.Path(sys.argv[1]).write_text(formula)
+          PYTHON
+
+      - name: Open formula bump PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          formula=Formula/ocalc.rb
+          git diff --exit-code --quiet "$formula" && { echo "::error::$formula unchanged"; exit 1; }
+
+          branch="bump-ocalc-${VERSION}"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)+${APP_SLUG}[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "ocalc ${VERSION}"
+          git push -u origin "$branch"
+          gh pr create --title "ocalc ${VERSION}" --body "Automated bump from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"

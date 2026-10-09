@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   # Builds and packages the binaries without publishing anything.
   workflow_dispatch:
 
@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(grep -oP '(?<=\(version )\S+(?=\))' dune-project)
-          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$version" ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match dune-project version $version"
             exit 1
           fi
@@ -40,13 +40,24 @@ jobs:
         include:
           - runner: macos-latest
             target: aarch64-apple-darwin
+            arch: arm64
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            arch: x86-64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            arch: aarch64
           - runner: windows-latest
             target: x86_64-pc-windows-gnu
+            arch: x86-64
+          # Experimental: may not be supported by the OCaml toolchain yet, so a
+          # failure here doesn't hold back the release.
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-gnu
+            arch: aarch64
+            experimental: true
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental == true }}
     defaults:
       run:
         shell: bash
@@ -72,6 +83,22 @@ jobs:
           result=$(_build/default/bin/main.exe '2 + 3' | tr -d '\r')
           if [[ "$result" != "5" ]]; then
             echo "::error::Expected 5, got '$result'"
+            exit 1
+          fi
+
+      - name: Check binary architecture
+        run: |
+          set -euo pipefail
+          binary=_build/default/bin/main.exe
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # The PE header's machine field: 0x8664 is x86-64, 0xaa64 is arm64.
+            arch=$(python -c "import struct, sys; d = open(sys.argv[1], 'rb').read(); pe = struct.unpack_from('<I', d, 0x3c)[0]; print({0x8664: 'x86-64', 0xaa64: 'aarch64'}.get(struct.unpack_from('<H', d, pe + 4)[0], 'unknown'))" "$binary")
+          else
+            arch=$(file -b "$binary")
+          fi
+          echo "$arch"
+          if [[ "$arch" != *"${{ matrix.arch }}"* ]]; then
+            echo "::error::Expected a ${{ matrix.arch }} binary for ${{ matrix.target }}"
             exit 1
           fi
 
